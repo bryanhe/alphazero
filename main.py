@@ -68,6 +68,9 @@ def score(state):
 def legal_moves(state):
     return np.logical_not(state[:2, 0, :].any(0)).nonzero()[0]
 
+def illegal_moves(state):
+    return state[:2, 0, :].any(0).nonzero()[0]
+
 @numba.jit(cache=True, nopython=True)
 def next_state(state, move):
     state = state.copy()
@@ -95,49 +98,70 @@ def random(state):
     return np.random.choice(legal_moves(state))
 
 import tqdm
-def mcts(state, heuristic, rollouts=100, alpha=1.0, tau=1.0):
+def mcts(state, heuristic, rollouts=1000, alpha=1.0, tau=1.0):
+    root = state.copy()
+
     _, m, n = state.shape
     P = {}
     V = {}
     N = {}
+    done = set()
+    moves = {}
     Q_unnormalized = {}
     for r in tqdm.trange(rollouts):
         print("rollout {}".format(r))
         ### Selection ###
         visited = []
-        state = init_state()
+        state = root.copy()
         depth = 0
         while True:
+            print_board(state)
             depth += 1
             h = hash_state(state)
-            print("hash", h)
-            #visited.append((h, )
-            if h not in P:
+            # print("hash", h)
+            if h not in P or h in done:
                 break
             Q = Q_unnormalized[h] / N[h]
             ucb = Q + alpha * P[h] / (1 + N[h])
-            move = np.argmax(ucb)
-            print(ucb)
-            print("move", m)
+            print(Q)
+            print(P[h])
+            print(N[h])
+            move = sorted((N[h][m] == 0, ucb[m], m) for m in moves[h])[-1][2]
+            visited.append((h, move))
             state = next_state(state, move)
-            if depth > 10:
-                asdasd
 
         # Expand
         P[h], V[h] = heuristic(state)
         # get rid of illegal moves from P
-        moves = legal_moves(state)
-        P[h][moves] = 0
+        moves[h] = legal_moves(state)
+        illegal = illegal_moves(state)
+        P[h][illegal] = 0
         P[h] /= P[h].sum()
         s = score(state)
         if s != 0:
             V[h] = s
-        N[h] = np.ones(n, np.int)
-        Q_unnormalized[h] = np.zeros(n, np.int)
+            done.add(h)
+        N[h] = np.zeros(n, np.int)
+        Q_unnormalized[h] = np.zeros(n)
+        v = V[h]
 
         # Backup
+        for (h, move) in visited:
+            Q_unnormalized[h][move] += v
+            N[h][move] += 1
             
-    return legal_moves(state)[0]
+    print("DEBUG")
+    print_board(root)
+    h = hash_state(root)
+    print(N[hash_state(root)])
+    print(P[hash_state(root)])
+    print(Q_unnormalized[hash_state(root)])
+    Q = Q_unnormalized[h] / N[h]
+    ucb = Q + alpha * P[h] / (1 + N[h])
+    print(ucb)
+    # asd
+    # import code; code.interact(local=locals())
+    return np.argmax(N[hash_state(root)]) # TODO: temperature
 
 def human(state):
     print_board(state)
