@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
+import math
 import torch
 import numpy as np
 import numba
+import time
+# TODO: need to terminate game if tie
 
 def print_board(state):
     _, m, n = state.shape
@@ -84,21 +87,32 @@ def next_state(state, move):
 
 # @numba.jit(cache=True, nopython=True)
 def hash_state(state):
-    # x = 1
-    h = 0
-    for i in range(state.shape[1]):
-        for j in range(state.shape[2]):
-            h += 2 * state[0, i, j] + state[1, i, j]
-            h *= 3
-            # x *= 3
-    # print(x)
-    return h
+    return state.tobytes()
+    # # x = 1
+    # h = 0
+    # for i in range(state.shape[1]):
+    #     for j in range(state.shape[2]):
+    #         h += 2 * state[0, i, j] + state[1, i, j]
+    #         h *= 3
+    #         # x *= 3
+    # # print(x)
+    # return h
 
 def random(state):
     return np.random.choice(legal_moves(state))
 
 import tqdm
-def mcts(state, heuristic, rollouts=1000, alpha=1.0, tau=1.0):
+def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
+
+    time_1a = 0.
+    time_1b = 0.
+    time_1c = 0.
+    time_1d = 0.
+    time_1e = 0.
+    time_1f = 0.
+    time_2 = 0.
+    time_3 = 0.
+
     root = state.copy()
 
     _, m, n = state.shape
@@ -108,23 +122,30 @@ def mcts(state, heuristic, rollouts=1000, alpha=1.0, tau=1.0):
     done = set()
     moves = {}
     Q_unnormalized = {}
-    for r in tqdm.trange(rollouts):
+    start = time.time()
+    for r in tqdm.trange(rollouts, disable=not verbose):
         # print("rollout {}".format(r))
         ### Selection ###
         visited = []
         state = root.copy()
         depth = 0
         while True:
+            t = time.time()
             # print_board(state)
             h = hash_state(state)
+            time_1a += (time.time() - t); t = time.time()
             # print("hash", h)
             if h not in P or h in done:
                 break
-            Q = Q_unnormalized[h] / N[h]
+            Q = Q_unnormalized[h] / np.maximum(N[h], 1)
+            time_1b += (time.time() - t); t = time.time()
             if not state[2, 0, 0]:
                 Q = - Q
-            ucb = Q + alpha * P[h] * np.sqrt(N[h].sum()) / (1 + N[h])
-            move = sorted((N[h][m] == 0, P[h][m], ucb[m], m) for m in moves[h])[-1][3]
+            time_1c += (time.time() - t); t = time.time()
+            ucb = Q + alpha * math.sqrt(N[h].sum()) * P[h] / (1 + N[h])
+            time_1d += (time.time() - t); t = time.time()
+            move = max(((N[h][m] == 0) * P[h][m], ucb[m], m) for m in moves[h])[2] # TODO as zip?
+            time_1e += (time.time() - t); t = time.time()
             # if depth == 0:
             #     print(ucb)
             #     print(Q)
@@ -135,6 +156,7 @@ def mcts(state, heuristic, rollouts=1000, alpha=1.0, tau=1.0):
             visited.append((h, move))
             state = next_state(state, move)
             depth += 1
+            time_1f += (time.time() - t); t = time.time()
 
         # Expand
         P[h], V[h] = heuristic(state)
@@ -144,17 +166,20 @@ def mcts(state, heuristic, rollouts=1000, alpha=1.0, tau=1.0):
         P[h][illegal] = 0
         P[h] /= P[h].sum()
         s = score(state)
-        if s != 0:
+        if s != 0 or moves[h].shape[0] == 0:
             V[h] = s
             done.add(h)
         N[h] = np.zeros(n, np.int)
         Q_unnormalized[h] = np.zeros(n)
         v = V[h]
 
+        time_2 += (time.time() - t); t = time.time()
+
         # Backup
         for (h, move) in visited:
             Q_unnormalized[h][move] += v
             N[h][move] += 1
+        time_3 += (time.time() - t); t = time.time()
             
     # print("DEBUG")
     # print_board(root)
@@ -165,9 +190,19 @@ def mcts(state, heuristic, rollouts=1000, alpha=1.0, tau=1.0):
     # Q = Q_unnormalized[h] / N[h]
     # ucb = Q + alpha * P[h] / (1 + N[h])
     # print(ucb)
-    # asd
-    # import code; code.interact(local=locals())
-    return np.argmax(N[hash_state(root)]) # TODO: temperature
+    p = N[hash_state(root)] ** (1 / tau)
+    p /= p.sum()
+    # import code; code.interact(local=dict(globals(), **locals()))
+    print("1a", time_1a)
+    print("1b", time_1b)
+    print("1c", time_1c)
+    print("1d", time_1d)
+    print("1e", time_1e)
+    print("1f", time_1e)
+    print("2 ", time_2)
+    print("3 ", time_3)
+    print("total ", time.time() - start)
+    return np.random.choice(7, p=p)
 
 class _ConvBlock(torch.nn.Module):
     def __init__(self, filters=256):
@@ -286,33 +321,48 @@ def play(p1, p2):
     while True:
         states.append(state)
         s = score(state)
-        if s != 0:
+        legal = legal_moves(state)
+        if s != 0 or legal.shape[0] == 0:
             break
         move = player[p](state)
         moves.append(move)
-        assert(move in legal_moves(state))
+        assert(move in legal)
         state = next_state(state, move)
         p = 1 - p
-    if p1 == human or p2 == human:
+    # if p1 == human or p2 == human:
+    if True: # p1 == human or p2 == human:
         print_board(state)
-    return states, moves, p
+    return states, moves, s
 
 def main():
 
     # play(human, random)
-    # play(human, lambda state: mcts(state, None))
-    # heuristic = lambda state: (np.ones(7), 0)
-    # play(lambda state: mcts(state, heuristic), human)
-    # TODO: eval and nograd
-    model = Dual(1)
-    def heuristic(state):
-        P, V = model(torch.Tensor(state).unsqueeze(0))
-        return P.detach().numpy()[0, :], V.item()
+    heuristic = lambda state: (np.ones(7), 0)
     play(lambda state: mcts(state, heuristic), human)
+    # play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic))
+    # TODO: eval and nograd
+    device = "cuda"
+    model = Dual(1)
+    model.to(device)
+    model.eval()
+    def heuristic(state):
+        P, V = model(torch.Tensor(state).to(device).unsqueeze(0))
+        P = torch.softmax(P, 1)
+        return P.detach().cpu().numpy()[0, :], V.item()
+    # # play(lambda state: mcts(state, heuristic), human)
+    # import cProfile
+    # # cProfile.run("states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))")
+    # cProfile.run("states, moves, p = play(lambda state: mcts(state, lambda state: (np.ones(7), 0)), lambda state:mcts(state, lambda state: (np.ones(7), 0)))")
+    # asd
 
-    for i in range(10):
-        states, moves, p = play(lambda state: mcts(state, heuristic), random)
-        print(p)
+    for i in range(1000):
+        # states, moves, p = play(lambda state: mcts(state, heuristic), random)
+        states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))
+        print("Reward: ", p, flush=True)
 
 if __name__ == "__main__":
     main()
+
+# GPU not blocked
+# For looping in python
+# Not reusing tree
