@@ -99,7 +99,7 @@ def hash_state(state):
     # return h
 
 def random(state):
-    return np.random.choice(legal_moves(state))
+    return [np.random.choice(legal_moves(s)) for s in state]
 
 import tqdm
 def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
@@ -115,71 +115,85 @@ def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
 
     root = state.copy()
 
-    _, m, n = state.shape
+    # TODO: check that shapes match
+    _, m, n = state[0].shape
+    N = [{} for _ in range(len(state))]
+    Q_unnormalized = [{} for _ in range(len(state))]
+    h = [None for _ in range(len(state))]
+    v = [None for _ in range(len(state))]
+
+    done = set()  # Do not need to have a different copy per game
+    moves = {}
     P = {}
     V = {}
-    N = {}
-    done = set()
-    moves = {}
-    Q_unnormalized = {}
+
     start = time.time()
     for r in tqdm.trange(rollouts, disable=not verbose):
         # print("rollout {}".format(r))
         ### Selection ###
-        visited = []
+        visited = [[] for _ in state]
         state = root.copy()
-        depth = 0
-        while True:
-            t = time.time()
-            # print_board(state)
-            h = hash_state(state)
-            time_1a += (time.time() - t); t = time.time()
-            # print("hash", h)
-            if h not in P or h in done:
-                break
-            Q = Q_unnormalized[h] / np.maximum(N[h], 1)
-            time_1b += (time.time() - t); t = time.time()
-            if not state[2, 0, 0]:
-                Q = - Q
-            time_1c += (time.time() - t); t = time.time()
-            ucb = Q + alpha * math.sqrt(N[h].sum()) * P[h] / (1 + N[h])
-            time_1d += (time.time() - t); t = time.time()
-            move = max(((N[h][m] == 0) * P[h][m], ucb[m], m) for m in moves[h])[2] # TODO as zip?
-            time_1e += (time.time() - t); t = time.time()
-            # if depth == 0:
-            #     print(ucb)
-            #     print(Q)
-            #     print(alpha * P[h] * np.sqrt(N[h].sum()) / (1 + N[h]))
-            #     print(P[h])
-            #     print(N[h])
-            #     print()
-            visited.append((h, move))
-            state = next_state(state, move)
-            depth += 1
-            time_1f += (time.time() - t); t = time.time()
+        depth = [0 for _ in state]
+        for i in range(len(state)):
+            while True:
+                t = time.time()
+                # print_board(state)
+                h[i] = hash_state(state[i])
+                time_1a += (time.time() - t); t = time.time()
+                # print("hash", h)
+                if h[i] not in P or h[i] in done:
+                    break
+                Q = Q_unnormalized[i][h[i]] / np.maximum(N[i][h[i]], 1)
+                time_1b += (time.time() - t); t = time.time()
+                if not state[i][2, 0, 0]:
+                    Q = - Q
+                time_1c += (time.time() - t); t = time.time()
+                ucb = Q + alpha * math.sqrt(N[i][h[i]].sum()) * P[h[i]] / (1 + N[i][h[i]])
+                time_1d += (time.time() - t); t = time.time()
+                move = max(((N[i][h[i]][m] == 0) * P[h[i]][m], ucb[m], m) for m in moves[h[i]])[2] # TODO as zip?
+                time_1e += (time.time() - t); t = time.time()
+                # if depth == 0:
+                #     print(ucb)
+                #     print(Q)
+                #     print(alpha * P[h] * np.sqrt(N[h].sum()) / (1 + N[h]))
+                #     print(P[h])
+                #     print(N[h])
+                #     print()
+                visited.append((h, move))
+                state[i] = next_state(state[i], move)
+                depth[i] += 1
+                time_1f += (time.time() - t); t = time.time()
 
         # Expand
-        P[h], V[h] = heuristic(state)
-        # get rid of illegal moves from P
-        moves[h] = legal_moves(state)
-        illegal = illegal_moves(state)
-        P[h][illegal] = 0
-        P[h] /= P[h].sum()
-        s = score(state)
-        if s != 0 or moves[h].shape[0] == 0:
-            V[h] = s
-            done.add(h)
-        N[h] = np.zeros(n, np.int)
-        Q_unnormalized[h] = np.zeros(n)
-        v = V[h]
+        # import code; code.interact(local=dict(globals(), **locals()))
+        p, v = heuristic(state)
+        for i in range(len(state)):
+            P[h[i]] = p[i, :]
+            V[h[i]] = v[i, 0]
+
+            moves[h[i]] = legal_moves(state[i])
+            # get rid of illegal moves from P
+            illegal = illegal_moves(state[i])
+            P[h[i]][illegal] = 0
+            P[h[i]] /= P[h[i]].sum()
+
+            s = score(state[i])
+            if s != 0 or moves[h[i]].shape[0] == 0:
+                V[h[i]] = s
+                done.add(h[i])
+
+            N[i][h[i]] = np.zeros(n, np.int)
+            Q_unnormalized[i][h[i]] = np.zeros(n)
+            v[i] = V[h[i]]
 
         time_2 += (time.time() - t); t = time.time()
 
         # Backup
-        for (h, move) in visited:
-            Q_unnormalized[h][move] += v
-            N[h][move] += 1
-        time_3 += (time.time() - t); t = time.time()
+        for i in range(len(state)):
+            for (h, move) in visited[i]:
+                Q_unnormalized[i][h[i]][move] += v
+                N[i][h[i]][move] += 1
+            time_3 += (time.time() - t); t = time.time()
             
     # print("DEBUG")
     # print_board(root)
@@ -312,43 +326,52 @@ def human(state):
             print()
     return move
 
-def play(p1, p2):
-    states = []
-    moves = []
-    state = init_state()
+def play(p1, p2, n=1):
+    states = [[] for _ in range(n)]
+    moves = [[] for _ in range(n)]
+    done = [False for _ in range(n)]
+    state = [init_state() for _ in range(n)]
     player = [p1, p2]
     p = 0
     while True:
-        states.append(state)
-        s = score(state)
-        legal = legal_moves(state)
-        if s != 0 or legal.shape[0] == 0:
+        for i in range(len(state)):
+            if not done[i]:
+                states[i].append(state[i])
+        sc = [score(i) for i in state]
+        legal = [legal_moves(i) for i in state]
+        done = [s != 0 or l.shape[0] == 0 for (s, l) in zip(sc, legal)]
+        if all(done):
             break
-        move = player[p](state)
+        move = player[p](state)  # TODO: only query moves that arent done
         moves.append(move)
-        assert(move in legal)
-        state = next_state(state, move)
+        assert(all(m in l for (m, l) in zip(move, legal)))
+        state = [next_state(s, m) if not d else s for (s, m, d) in zip(state, move, done)]
         p = 1 - p
     # if p1 == human or p2 == human:
     if True: # p1 == human or p2 == human:
-        print_board(state)
+        for s in state:
+            print_board(s)
     return states, moves, s
 
 def main():
 
     # play(human, random)
-    heuristic = lambda state: (np.ones(7), 0)
-    play(lambda state: mcts(state, heuristic), human)
+    # heuristic = lambda state: (np.ones(7), 0)
+    # play(lambda state: mcts(state, heuristic), human)
     # play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic))
     # TODO: eval and nograd
+
+    # states, moves, p = play(random, random)
+    # asd
+
     device = "cuda"
-    model = Dual(1)
+    model = Dual(5)
     model.to(device)
     model.eval()
     def heuristic(state):
-        P, V = model(torch.Tensor(state).to(device).unsqueeze(0))
+        P, V = model(torch.Tensor(state).to(device))
         P = torch.softmax(P, 1)
-        return P.detach().cpu().numpy()[0, :], V.item()
+        return P.detach().cpu().numpy(), V.detach().cpu().numpy()
     # # play(lambda state: mcts(state, heuristic), human)
     # import cProfile
     # # cProfile.run("states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))")
