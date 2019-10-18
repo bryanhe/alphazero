@@ -102,7 +102,7 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 import tqdm
-def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
+def mcts(state, heuristic, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
 
     time_1a = 0.
     time_1b = 0.
@@ -112,6 +112,7 @@ def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
     time_1f = 0.
     time_2 = 0.
     time_3 = 0.
+    time_4 = 0.
 
     root = state.copy()
 
@@ -193,7 +194,7 @@ def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
             for (h, move) in visited[i]:
                 Q_unnormalized[i][h[i]][move] += v
                 N[i][h[i]][move] += 1
-            time_3 += (time.time() - t); t = time.time()
+        time_3 += (time.time() - t); t = time.time()
             
     # print("DEBUG")
     # print_board(root)
@@ -204,8 +205,13 @@ def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
     # Q = Q_unnormalized[h] / N[h]
     # ucb = Q + alpha * P[h] / (1 + N[h])
     # print(ucb)
-    p = N[hash_state(root)] ** (1 / tau)
-    p /= p.sum()
+
+    a = []
+    for i in range(len(root)):
+        p = N[i][hash_state(root[i])] ** (1 / tau)
+        p /= p.sum()
+        a.append(np.random.choice(7, p=p))
+    time_4 += (time.time() - t); t = time.time()
     # import code; code.interact(local=dict(globals(), **locals()))
     print("1a", time_1a)
     print("1b", time_1b)
@@ -215,8 +221,9 @@ def mcts(state, heuristic, rollouts=10000, alpha=5.0, tau=1.0, verbose=True):
     print("1f", time_1e)
     print("2 ", time_2)
     print("3 ", time_3)
+    print("4 ", time_4)
     print("total ", time.time() - start)
-    return np.random.choice(7, p=p)
+    return a
 
 class _ConvBlock(torch.nn.Module):
     def __init__(self, filters=256):
@@ -380,7 +387,8 @@ def main():
 
     for i in range(1000):
         # states, moves, p = play(lambda state: mcts(state, heuristic), random)
-        states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))
+        # states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))
+        states, moves, p = play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 10)
         print("Reward: ", p, flush=True)
 
 if __name__ == "__main__":
