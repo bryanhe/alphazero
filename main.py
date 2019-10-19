@@ -7,7 +7,9 @@ import numpy as np
 import numba
 import time
 import threading
-import multiprocessing
+import torch.multiprocessing as multiprocessing
+multiprocessing = multiprocessing.get_context("spawn")
+
 # TODO: need to terminate game if tie
 
 def print_board(state):
@@ -106,6 +108,7 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 def run(i, root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
+    print(i, flush=True)
     np.random.seed(i)
     _, m, n = root.shape
     start = time.time()
@@ -175,7 +178,23 @@ def run(i, root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbo
     p /= p.sum()
     return np.random.choice(7, p=p)
 
-def mcts(root, heuristic, batch=False, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
+def init(barrier_, state_buffer_, P_buffer_, V_buffer_, root):
+    global barrier
+    barrier = barrier_
+    global state_buffer
+    state_buffer = np.frombuffer(state_buffer_, dtype=np.bool).reshape(len(root), *root[0].shape)
+    global P_buffer
+    P_buffer = np.frombuffer(P_buffer_, dtype=np.float).reshape(len(root), 7)
+    global V_buffer
+    V_buffer = np.frombuffer(V_buffer_, dtype=np.float).reshape(len(root), 1)
+
+class HeuristicEval(object):
+    def __init__(self, heuristic):
+        self.heuristic = heuristic
+    def __call__(self):
+        P_buffer[:], V_buffer[:] = self.heuristic(state_buffer)
+
+def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
 
     root = root.copy()
 
@@ -184,13 +203,18 @@ def mcts(root, heuristic, batch=False, rollouts=1600, alpha=5.0, tau=1.0, verbos
 
 
     # TODO: empty
-    state_buffer = np.zeros((len(root), *root[0].shape), np.bool)
-    P_buffer = np.zeros((len(root), root[0].shape[2]))
-    V_buffer = np.zeros((len(root), 1))
-    def heuristic_eval():
-        P_buffer[:], V_buffer[:] = heuristic(state_buffer)
+    # import code; code.interact(local=dict(globals(), **locals()))
+    # state_buffer = np.zeros((len(root), *root[0].shape), np.bool)  # TODO: make shared
+    # P_buffer = np.zeros((len(root), root[0].shape[2]))
+    # V_buffer = np.zeros((len(root), 1))
+    # https://research.wmz.ninja/articles/2018/03/on-sharing-large-arrays-when-using-pythons-multiprocessing.html
+    state_buffer = multiprocessing.RawArray("b", sum(r.size for r in root))
+    P_buffer = multiprocessing.RawArray("d", 7 * len(root))
+    V_buffer = multiprocessing.RawArray("d", 1 * len(root))
 
+    heuristic_eval = HeuristicEval(heuristic)
     barrier = multiprocessing.Barrier(len(root), action=heuristic_eval)
+    # barrier = multiprocessing.Barrier(len(root))  # TODO add back action
 
                 
     # print("DEBUG")
@@ -213,10 +237,10 @@ def mcts(root, heuristic, batch=False, rollouts=1600, alpha=5.0, tau=1.0, verbos
     #     t.join()
 
     t = time.time()
-    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+    with multiprocessing.Pool(processes=multiprocessing.cpu_count(), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
         print("A", time.time() - t); t = time.time()
         # TODO: just return from this
-        ans = pool.starmap(run, [(i, r, heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
+        ans = pool.starmap(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
         print("B", time.time() - t); t = time.time()
         # ans = []
         # for x in [(i, r, heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)]:
@@ -358,12 +382,24 @@ def play(p1, p2, n=1):
         print("ASD", time.time() - t)
     # if p1 == human or p2 == human:
     if True: # p1 == human or p2 == human:
-        for s in state:
+        for ns in state:
             print_board(s)
     return states, moves, sc
 
 def basic_heuristic(state):
     return np.ones((state.shape[0], 7)), np.zeros((state.shape[0], 1))
+
+# https://stackoverflow.com/questions/573569/python-serialize-lexical-closures
+class ModelHeuristic(object):
+    def __init__(self, model, device):
+        self.model = model
+        self.device = device
+    def __call__(self, state):
+        # print(state)
+        # P, V = self.model(torch.Tensor(state).to(self.device))
+        P, V = self.model(torch.Tensor(state).to(self.device))
+        P = torch.softmax(P, 1)
+        return P.detach().cpu().numpy(), V.detach().cpu().numpy()
 
 def main():
 
@@ -379,20 +415,19 @@ def main():
     model = Dual(5)
     model.to(device)
     model.eval()
-    def heuristic(state):
-        P, V = model(torch.Tensor(state).to(device))
-        P = torch.softmax(P, 1)
-        return P.detach().cpu().numpy(), V.detach().cpu().numpy()
     # # play(lambda state: mcts(state, heuristic), human)
     # import cProfile
     # # cProfile.run("states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))")
     # cProfile.run("states, moves, p = play(lambda state: mcts(state, lambda state: (np.ones(7), 0)), lambda state:mcts(state, lambda state: (np.ones(7), 0)))")
     # asd
+    model.share_memory()
+    model_heuristic = ModelHeuristic(model, device)
 
     for i in range(1000):
         # states, moves, p = play(lambda state: mcts(state, heuristic), random)
         # states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))
-        states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, basic_heuristic), 100)
+        # states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, basic_heuristic), 100)
+        states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, model_heuristic), 100)
         # states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, basic_heuristic), 1)
         # states, moves, p = play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 1000)
         print("Reward: ", p, flush=True)
