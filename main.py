@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import tqdm
 import math
 import torch
@@ -9,8 +10,6 @@ import time
 import threading
 import torch.multiprocessing as multiprocessing
 multiprocessing = multiprocessing.get_context("spawn")
-
-# TODO: need to terminate game if tie
 
 def init_state(m=6, n=7):
     return np.zeros((3, m, n), np.bool)
@@ -99,7 +98,7 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 # TODO: try to process root in blocks (and allow multidim root)
-def run(i, root, heuristic, batch=True, rollouts=400, alpha=5.0, tau=1.0, verbose=True):
+def run(i, root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
     np.random.seed(i)
     _, m, n = root.shape
     done = set()  # Do not need to have a different copy per game
@@ -109,6 +108,7 @@ def run(i, root, heuristic, batch=True, rollouts=400, alpha=5.0, tau=1.0, verbos
     N = {}
     Q_unnormalized = {}
     v = None
+    # TODO: tqdm doesn't make sense if not synced
     for r in tqdm.trange(rollouts, disable=(not verbose or i != 0)):
         ### Selection ###
         state = root.copy()
@@ -150,7 +150,8 @@ def run(i, root, heuristic, batch=True, rollouts=400, alpha=5.0, tau=1.0, verbos
         # get rid of illegal moves from P
         illegal = illegal_moves(state)
         P[h][illegal] = 0
-        P[h] /= P[h].sum()
+        if moves[h].shape[0] != 0:
+            P[h] /= P[h].sum()
 
         s = score(state)
         if s != 0 or moves[h].shape[0] == 0:
@@ -194,38 +195,48 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
     # P_buffer = np.zeros((len(root), root[0].shape[2]))
     # V_buffer = np.zeros((len(root), 1))
     # https://research.wmz.ninja/articles/2018/03/on-sharing-large-arrays-when-using-pythons-multiprocessing.html
+
+    # TODO: recycle
     state_buffer = multiprocessing.RawArray("b", sum(r.size for r in root))
     P_buffer = multiprocessing.RawArray("d", 7 * len(root))
     V_buffer = multiprocessing.RawArray("d", 1 * len(root))
+    barrier = multiprocessing.Barrier(len(root) + 1)
 
     state = np.frombuffer(state_buffer, dtype=np.bool).reshape(len(root), *root[0].shape)
     P = np.frombuffer(P_buffer, dtype=np.float).reshape(len(root), 7)
     V = np.frombuffer(V_buffer, dtype=np.float).reshape(len(root), 1)
 
-    barrier = multiprocessing.Barrier(len(root) + 1)  # TODO add back action
-
     # for i in range(len(root)):
     #     run(i)
 
+    # TODO: set option to run sequentially (for debugging, and is faster when only a small number of roots)
     print("Setting up memory:", time.time() - t); t = time.time()
-    gpu = 0.
-    # TODO: only need to run init if batch
-    with multiprocessing.Pool(processes=len(root), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
+    if run.batch is None or run.batch < len(root):
+        run.batch = len(root)
+        if run.pool is not None:
+            pass  # TODO: free old pool
+        # TODO: only need to run init if batch
+        run.pool = multiprocessing.Pool(processes=len(root), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root))
         print("Setting up pool:", time.time() - t); t = time.time()
-        ans = pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
-        if batch:
-            for i in range(rollouts):
-                barrier.wait()
-                t = time.time()
-                P[:], V[:] = heuristic(state)
-                gpu += time.time() - t
-                barrier.wait()
-            print("gpu:", gpu); t = time.time()
-        ans = ans.get()
+
+    gpu = 0.
+    ans = run.pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
+    if batch:
+        for i in range(rollouts):
+            barrier.wait()
+            t = time.time()
+            P[:], V[:] = heuristic(state)
+            gpu += time.time() - t
+            barrier.wait()
+        print("gpu:", gpu); t = time.time()
+    ans = ans.get()
     print("sync", time.time() - t); t = time.time()
     print("TOTAL", time.time() -  start)
     print("AVE", (time.time() -  start) / len(root))
     return ans
+run.batch = None
+run.pool = None
+
 
 class _ConvBlock(torch.nn.Module):
     def __init__(self, filters=256):
@@ -351,13 +362,25 @@ def play(p1, p2, n=1):
         done = [s != 0 or l.shape[0] == 0 for (s, l) in zip(sc, legal)]
         if all(done):
             break
-        move = player[p](state)  # TODO: only query moves that arent done
-        moves.append(move)
+        move = player[p]([s for (s, d) in zip(state, done) if not d])
+
+        index = 0
+        new_move = [None for _ in states]
+        for (i, d) in enumerate(done):
+            if not d:
+                new_move[i] = move[index]
+                index += 1
+        move = new_move
+
+        for i in range(len(state)):
+            moves[i].append(move[i])
         assert(all(d or m in l for (m, l, d) in zip(move, legal, done)))
         state = [next_state(s, m) if not d else s for (s, m, d) in zip(state, move, done)]
         p = 1 - p
-    # if p1 == human or p2 == human:
-    if True: # p1 == human or p2 == human:
+    for i in range(len(state)):
+        moves[i].append(None)
+    if p1 == human or p2 == human:
+    # if True:
         for ns in state:
             print_board(s)
     return states, moves, sc
@@ -377,6 +400,89 @@ class ModelHeuristic(object):
         P = torch.softmax(P, 1)
         return P.detach().cpu().numpy(), V.detach().cpu().numpy()
 
+def selfplay():
+    EPOCHS = 1000
+    BUFFER_SIZE = 1000
+    device = "cuda"
+    output = "output"
+    os.makedirs(output, exist_ok=True)
+
+    model = Dual(5)
+    model.to(device)
+    model.share_memory()
+    model_heuristic = ModelHeuristic(model, device)
+
+    best = Dual(5)
+    best.load_state_dict(model.state_dict())
+
+    optim = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=0)
+
+    # TODO: reload values
+
+    state_buffer = []
+    move_buffer = []
+    reward_buffer = []
+    for epoch in range(EPOCHS):
+        epoch_start = time.time()
+        # TODO: select whether to do fast or proper rollouts
+        model.eval()  # TODO: also no_grad
+        state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+        print("Epoch #{} playouts took {} seconds.".format(epoch, time.time() - epoch_start))
+
+        t = time.time()
+        for (s, m, r) in zip(state, move, reward):
+            for i in range(len(s)):
+                state_buffer.append(s[i])
+                move_buffer.append(m[i] if m[i] is not None else -1)
+                reward_buffer.append(r)
+
+        # TODO: cut buffer to desired length
+
+        total_pl = 0.
+        total_rl = 0.
+        correct_p = 0
+        correct_r = 0
+        n = 0
+        model.train()
+        dataset = torch.utils.data.TensorDataset(torch.as_tensor(state_buffer, dtype=torch.float), torch.as_tensor(move_buffer), torch.as_tensor(reward_buffer))
+        loader = torch.utils.data.DataLoader(dataset, num_workers=8, batch_size=256, shuffle=True, drop_last=True)
+        for (s, m, r) in loader:
+            s = s.to(device)
+            m = m.to(device)
+            r = r.to(device)
+            p, v = model(s)
+            policy_loss = torch.nn.functional.cross_entropy(p, m, ignore_index=-1)
+            reward_loss = torch.nn.functional.mse_loss(v.view(-1), r.float())
+            loss = reward_loss + policy_loss
+            total_pl += policy_loss.item() * s.shape[0]
+            total_rl += reward_loss.item() * s.shape[0]
+            correct_r += (v.round().long().view(-1) == r).sum().item()
+            correct_p += (torch.argmax(p, dim=1) == m).sum().item()  # TODO: need to fix denominator for this -- not all states have a move
+            n += s.shape[0]
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+        
+        print("Policy Loss: {}".format(total_pl / n))
+        print("Policy Acc:  {}".format(correct_p / n))
+        print("Reward Loss: {}".format(total_rl / n))
+        print("Reward Acc:  {}".format(correct_r / n))
+        print("Epoch #{} training took {} seconds.".format(epoch, time.time() - epoch_start))
+
+        torch.save({"epoch": epoch,
+                    "state_buffer": state_buffer,
+                    "move_buffer": move_buffer,
+                    "reward_buffer": reward_buffer,
+                    "model_state_dict": model.state_dict(),
+                    "best_state_dict": best.state_dict(),
+                    'optim_state_dict': optim.state_dict(),
+                    }, os.path.join(output, "checkpoint.pt"))
+
+        # TODO: periodically check which model is better
+
+        # Save metadata
+
+
 def main():
 
     # play(human, random)
@@ -384,19 +490,14 @@ def main():
     # play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 2)
 
     # TODO: eval and nograd
-    device = "cuda"
-    model = Dual(5)
-    model.to(device)
-    model.eval()
-    model.share_memory()
-    model_heuristic = ModelHeuristic(model, device)
+    selfplay()
 
-    for i in range(1000):
-        states, moves, p = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
-        states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic), 128)
-        states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, model_heuristic), 128)
-        states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, model_heuristic), 128)
-        print("Reward: ", p, flush=True)
+    # for i in range(1000):
+    #     states, moves, p = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+    #     # states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic), 128)
+    #     # states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, model_heuristic), 128)
+    #     # states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, model_heuristic), 128)
+    #     print("Reward: ", p, flush=True)
 
 if __name__ == "__main__":
     main()
