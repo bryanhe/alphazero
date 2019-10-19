@@ -108,7 +108,6 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 def run(i, root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
-    print(i, flush=True)
     np.random.seed(i)
     _, m, n = root.shape
     start = time.time()
@@ -147,6 +146,7 @@ def run(i, root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbo
         # Expand
         if batch:
             state_buffer[i, ...] = state
+            barrier.wait()
             barrier.wait()
             P[h] = P_buffer[i, :]
             V[h] = V_buffer[i, 0]
@@ -196,11 +196,11 @@ class HeuristicEval(object):
 
 def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
 
+    start = time.time()
     root = root.copy()
 
     # TODO: check that shapes match
     _, m, n = root[0].shape
-
 
     # TODO: empty
     # import code; code.interact(local=dict(globals(), **locals()))
@@ -212,9 +212,13 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
     P_buffer = multiprocessing.RawArray("d", 7 * len(root))
     V_buffer = multiprocessing.RawArray("d", 1 * len(root))
 
+    state = np.frombuffer(state_buffer, dtype=np.bool).reshape(len(root), *root[0].shape)
+    P = np.frombuffer(P_buffer, dtype=np.float).reshape(len(root), 7)
+    V = np.frombuffer(V_buffer, dtype=np.float).reshape(len(root), 1)
+
     heuristic_eval = HeuristicEval(heuristic)
-    barrier = multiprocessing.Barrier(len(root), action=heuristic_eval)
-    # barrier = multiprocessing.Barrier(len(root))  # TODO add back action
+    # barrier = multiprocessing.Barrier(len(root), action=heuristic_eval)
+    barrier = multiprocessing.Barrier(len(root) + 1)  # TODO add back action
 
                 
     # print("DEBUG")
@@ -236,17 +240,26 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
     # for t in thread:
     #     t.join()
 
+    print("DEBUG", flush=True)
     t = time.time()
-    with multiprocessing.Pool(processes=multiprocessing.cpu_count(), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
+    # with multiprocessing.Pool(processes=multiprocessing.cpu_count(), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
+    with multiprocessing.Pool(processes=len(root), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
         print("A", time.time() - t); t = time.time()
         # TODO: just return from this
-        ans = pool.starmap(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
+        ans = pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
+        for i in range(rollouts):
+            barrier.wait()
+            P[:], V[:] = heuristic(state)
+            barrier.wait()
         print("B", time.time() - t); t = time.time()
+        ans = ans.get()
         # ans = []
         # for x in [(i, r, heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)]:
         #     ans.append(run(*x))
         # return ans
     print("C", time.time() - t); t = time.time()
+    print("TOTAL", time.time() -  start)
+    print("AVE", (time.time() -  start) / len(root))
     return ans
 
 class _ConvBlock(torch.nn.Module):
@@ -427,7 +440,7 @@ def main():
         # states, moves, p = play(lambda state: mcts(state, heuristic), random)
         # states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))
         # states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, basic_heuristic), 100)
-        states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, model_heuristic), 100)
+        states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, model_heuristic), 128)
         # states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, basic_heuristic), 1)
         # states, moves, p = play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 1000)
         print("Reward: ", p, flush=True)
