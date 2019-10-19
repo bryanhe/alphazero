@@ -104,7 +104,9 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 import tqdm
-def mcts(root, heuristic, batch=False, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
+def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
+
+
 
     root = root.copy()
 
@@ -116,6 +118,15 @@ def mcts(root, heuristic, batch=False, rollouts=1600, alpha=5.0, tau=1.0, verbos
     P = {}
     V = {}
     ans = [None for _ in root]
+
+    # TODO: empty
+    state_buffer = np.zeros((len(root), *root[0].shape), np.bool)
+    P_buffer = np.zeros((len(root), root[0].shape[2]))
+    V_buffer = np.zeros((len(root), 1))
+    def heuristic_eval():
+        P_buffer[:], V_buffer[:] = heuristic(state_buffer)
+
+    barrier = threading.Barrier(len(root), action=heuristic_eval)
 
     def run(i):
         start = time.time()
@@ -149,7 +160,10 @@ def mcts(root, heuristic, batch=False, rollouts=1600, alpha=5.0, tau=1.0, verbos
 
             # Expand
             if batch:
-                asd  # TODO: block
+                state_buffer[i, ...] = state
+                barrier.wait()
+                P[h] = P_buffer[i, :]
+                V[h] = V_buffer[i, 0]
             else:
                 p, v = heuristic(np.expand_dims(state, 0))
                 P[h] = p[0, :]  # TODO: ???
@@ -187,6 +201,10 @@ def mcts(root, heuristic, batch=False, rollouts=1600, alpha=5.0, tau=1.0, verbos
     # Q = Q_unnormalized[h] / N[h]
     # ucb = Q + alpha * P[h] / (1 + N[h])
     # print(ucb)
+
+    # for i in range(len(root)):
+    #     run(i)
+
     thread = [threading.Thread(target=run, args=(i, )) for i in range(len(root))]
     for t in thread:
         t.start()
@@ -328,14 +346,14 @@ def play(p1, p2, n=1):
     if True: # p1 == human or p2 == human:
         for s in state:
             print_board(s)
-    return states, moves, s
+    return states, moves, sc
 
 def main():
 
     # play(human, random)
-    # heuristic = lambda state: (np.ones(7), 0)
+    heuristic = lambda state: (np.ones((state.shape[0], 7)), np.zeros((state.shape[0], 1)))
     # play(lambda state: mcts(state, heuristic), human)
-    # play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic))
+    # play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 2)
     # TODO: eval and nograd
 
     # states, moves, p = play(random, random)
@@ -358,7 +376,7 @@ def main():
     for i in range(1000):
         # states, moves, p = play(lambda state: mcts(state, heuristic), random)
         # states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))
-        states, moves, p = play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 2)
+        states, moves, p = play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 100)
         print("Reward: ", p, flush=True)
 
 if __name__ == "__main__":
