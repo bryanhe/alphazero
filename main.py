@@ -99,75 +99,84 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 # TODO: try to process root in blocks (and allow multidim root)
-def run(i, root, heuristic, batch=True, rollouts=400, alpha=5.0, tau=1.0, verbose=True):
+def run(i, root, heuristic, sync=True, rollouts=400, alpha=5.0, tau=1.0, verbose=True):
     np.random.seed(i)
-    _, m, n = root.shape
+    b, _, m, n = root.shape
+    assert(_ == 3)
     done = set()  # Do not need to have a different copy per game
     moves = {}
     P = {}
     V = {}
-    N = {}
-    Q_unnormalized = {}
-    v = None
+    N = [{} for _ in range(b)]
+    Q_unnormalized = [{} for _ in range(b)]
+    v = [None for _ in range(b)]
     for r in tqdm.trange(rollouts, disable=(not verbose or i != 0)):
         ### Selection ###
         state = root.copy()
-        visited = []
-        depth = 0
-        while True:
-            h = hash_state(state)
-            if h not in N or h in done:  # TODO condition is broken now, since h might get added by another thread
-                break
-            Q = Q_unnormalized[h] / np.maximum(N[h], 1)
-            if not state[2, 0, 0]:
-                Q = - Q
-            ucb = Q + alpha * math.sqrt(N[h].sum()) * P[h] / (1 + N[h])
-            move = max(((N[h][m] == 0) * P[h][m], ucb[m], m) for m in moves[h])[2] # TODO as zip?
-            # if depth == 0:
-            #     print(ucb)
-            #     print(Q)
-            #     print(alpha * P[h] * np.sqrt(N[h].sum()) / (1 + N[h]))
-            #     print(P[h])
-            #     print(N[h])
-            #     print()
-            visited.append((h, move))
-            state = next_state(state, move)
-            depth += 1
+        visited = [[] for _ in range(b)]
+        depth =[0 for _ in range(b)]
+        h =[None for _ in range(b)]  # TODO: is recomputing just faster?
+
+        for i in range(b):
+            while True:
+                h[i] = hash_state(state[i])
+                if h[i] not in N[i] or h[i] in done:  # TODO condition is broken now, since h might get added by another thread
+                    break
+                Q = Q_unnormalized[i][h[i]] / np.maximum(N[i][h[i]], 1)
+                if not state[i][2, 0, 0]:
+                    Q = - Q
+                ucb = Q + alpha * math.sqrt(N[i][h[i]].sum()) * P[h[i]] / (1 + N[i][h[i]])
+                move = max(((N[i][h[i]][m] == 0) * P[h[i]][m], ucb[m], m) for m in moves[h[i]])[2] # TODO as zip?
+                # if depth == 0:
+                #     print(ucb)
+                #     print(Q)
+                #     print(alpha * P[h] * np.sqrt(N[h].sum()) / (1 + N[h]))
+                #     print(P[h])
+                #     print(N[h])
+                #     print()
+                visited[i].append((h[i], move))
+                state[i] = next_state(state[i], move)
+                depth[i] += 1
 
         # Expand
-        if batch:
-            state_buffer[i, ...] = state
+        if sync:
+            state_buffer[i:(i + b), ...] = state
             barrier.wait()
             barrier.wait()
-            P[h] = P_buffer[i, :]
-            V[h] = V_buffer[i, 0]
+            P[h] = P_buffer[i, :] # TODO: fix
+            V[h] = V_buffer[i, 0] # TODO: fix
         else:
-            p, v = heuristic(np.expand_dims(state, 0))
-            P[h] = p[0, :]
-            V[h] = v[0, 0]
+            p, v = heuristic(state)
+            for i in range(b):
+                P[h[i]] = p[i, :]
+                V[h[i]] = v[i, 0]
 
-        moves[h] = legal_moves(state)
-        # get rid of illegal moves from P
-        illegal = illegal_moves(state)
-        P[h][illegal] = 0
-        P[h] /= P[h].sum()
+        for i in range(b):
+            moves[h[i]] = legal_moves(state)
+            # get rid of illegal moves from P
+            illegal = illegal_moves(state)
+            P[h[i]][illegal] = 0
+            P[h[i]] /= P[h[i]].sum()
 
-        s = score(state)
-        if s != 0 or moves[h].shape[0] == 0:
-            V[h] = s
-            done.add(h)
+            s = score(state[i])
+            if s != 0 or moves[h[i]].shape[0] == 0:
+                V[h[i]] = s
+                done.add(h[i])
 
-        N[h] = np.zeros(n, np.int)
-        Q_unnormalized[h] = np.zeros(n)
-        v = V[h]
+            N[i][h[i]] = np.zeros(n, np.int)
+            Q_unnormalized[i][h[i]] = np.zeros(n)
+            v = V[h[i]]
 
-        # Backup
-        for (h, move) in visited:
-            Q_unnormalized[h][move] += v
-            N[h][move] += 1
-    p = N[hash_state(root)] ** (1 / tau)
-    p /= p.sum()
-    return np.random.choice(7, p=p)
+            # Backup
+            for (hash, move) in visited[i]:
+                Q_unnormalized[i][hash][move] += v
+                N[i][hash][move] += 1
+    ans = []
+    for i in range(b):
+        p = N[i][hash_state(root[i])] ** (1 / tau)
+        p /= p.sum()
+        ans.append(np.random.choice(7, p=p))
+    return ans
 
 def init(barrier_, state_buffer_, P_buffer_, V_buffer_, root):
     global barrier
@@ -179,14 +188,15 @@ def init(barrier_, state_buffer_, P_buffer_, V_buffer_, root):
     global V_buffer
     V_buffer = np.frombuffer(V_buffer_, dtype=np.float).reshape(len(root), 1)
 
-def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
+def mcts(root, heuristic, sync=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
 
     start = time.time()
     t = time.time()
     root = root.copy()
 
     # TODO: check that shapes match
-    _, m, n = root[0].shape
+    root = np.array(root)
+    b, _, m, n = root.shape
 
     # TODO: empty
     # import code; code.interact(local=dict(globals(), **locals()))
@@ -209,20 +219,27 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
 
     print("Setting up memory:", time.time() - t); t = time.time()
     gpu = 0.
-    # TODO: only need to run init if batch
-    with multiprocessing.Pool(processes=len(root), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
-        print("Setting up pool:", time.time() - t); t = time.time()
-        ans = pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
-        if batch:
-            for i in range(rollouts):
-                barrier.wait()
-                t = time.time()
-                P[:], V[:] = heuristic(state)
-                gpu += time.time() - t
-                barrier.wait()
-            print("gpu:", gpu); t = time.time()
-        ans = ans.get()
-    print("sync", time.time() - t); t = time.time()
+    workers = 24  # TODO
+    if workers == 0:
+        # TODO: collect answers
+        for (i, _) in enumerate(root):
+            run(i * batch, root[i * batch:(i + 1) * batch, ...], None if sync else heuristic, sync, rollouts, alpha, tau, verbose) 
+    else:
+        batch = b // workers
+        # TODO: only need to run init if sync
+        with multiprocessing.Pool(processes=workers, initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
+            print("Setting up pool:", time.time() - t); t = time.time()
+            ans = pool.starmap_async(run, [(i * batch, root[i * batch:(i + 1) * batch, ...], None if sync else heuristic, sync, rollouts, alpha, tau, verbose) for (i, _) in enumerate(root)])
+            if sync:
+                for i in range(rollouts):
+                    barrier.wait()
+                    t = time.time()
+                    P[:], V[:] = heuristic(state)
+                    gpu += time.time() - t
+                    barrier.wait()
+                print("gpu:", gpu); t = time.time()
+            ans = ans.get()
+        print("sync", time.time() - t); t = time.time()
     print("TOTAL", time.time() -  start)
     print("AVE", (time.time() -  start) / len(root))
     return ans
@@ -392,7 +409,7 @@ def main():
     model_heuristic = ModelHeuristic(model, device)
 
     for i in range(1000):
-        states, moves, p = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+        states, moves, p = play(lambda state: mcts(state, basic_heuristic, sync=False), lambda state: mcts(state, basic_heuristic, sync=False), 128)
         states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic), 128)
         states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, model_heuristic), 128)
         states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, model_heuristic), 128)
