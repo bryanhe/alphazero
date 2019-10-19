@@ -181,7 +181,6 @@ def init(barrier_, state_buffer_, P_buffer_, V_buffer_, root):
     V_buffer = np.frombuffer(V_buffer_, dtype=np.float).reshape(len(root), 1)
 
 def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
-
     start = time.time()
     t = time.time()
     root = root.copy()
@@ -196,38 +195,36 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
     # V_buffer = np.zeros((len(root), 1))
     # https://research.wmz.ninja/articles/2018/03/on-sharing-large-arrays-when-using-pythons-multiprocessing.html
 
-    # TODO: recycle
-    state_buffer = multiprocessing.RawArray("b", sum(r.size for r in root))
-    P_buffer = multiprocessing.RawArray("d", 7 * len(root))
-    V_buffer = multiprocessing.RawArray("d", 1 * len(root))
-    barrier = multiprocessing.Barrier(len(root) + 1)
-
-    state = np.frombuffer(state_buffer, dtype=np.bool).reshape(len(root), *root[0].shape)
-    P = np.frombuffer(P_buffer, dtype=np.float).reshape(len(root), 7)
-    V = np.frombuffer(V_buffer, dtype=np.float).reshape(len(root), 1)
-
     # for i in range(len(root)):
     #     run(i)
 
     # TODO: set option to run sequentially (for debugging, and is faster when only a small number of roots)
-    print("Setting up memory:", time.time() - t); t = time.time()
-    if run.batch is None or run.batch < len(root):
+    if run.batch is None or run.batch < len(root):  # TODO: buffers probably have problems if not exact same size
         run.batch = len(root)
         if run.pool is not None:
             pass  # TODO: free old pool
         # TODO: only need to run init if batch
-        run.pool = multiprocessing.Pool(processes=len(root), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root))
+        run.state_buffer = multiprocessing.RawArray("b", sum(r.size for r in root))
+        run.P_buffer = multiprocessing.RawArray("d", 7 * len(root))
+        run.V_buffer = multiprocessing.RawArray("d", 1 * len(root))
+        run.barrier = multiprocessing.Barrier(len(root) + 1)
+        run.pool = multiprocessing.Pool(processes=len(root), initializer=init, initargs=(run.barrier, run.state_buffer, run.P_buffer, run.V_buffer, root))  # TODO: is root really needed
+
         print("Setting up pool:", time.time() - t); t = time.time()
+
+    state = np.frombuffer(run.state_buffer, dtype=np.bool).reshape(len(root), *root[0].shape)
+    P = np.frombuffer(run.P_buffer, dtype=np.float).reshape(len(root), 7)
+    V = np.frombuffer(run.V_buffer, dtype=np.float).reshape(len(root), 1)
 
     gpu = 0.
     ans = run.pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
     if batch:
         for i in range(rollouts):
-            barrier.wait()
+            run.barrier.wait()
             t = time.time()
             P[:], V[:] = heuristic(state)
             gpu += time.time() - t
-            barrier.wait()
+            run.barrier.wait()
         print("gpu:", gpu); t = time.time()
     ans = ans.get()
     print("sync", time.time() - t); t = time.time()
@@ -409,32 +406,47 @@ def selfplay():
 
     model = Dual(5)
     model.to(device)
-    model.share_memory()
-    model_heuristic = ModelHeuristic(model, device)
+    model.share_memory()  # TODO: is this needed?
 
     best = Dual(5)
     best.load_state_dict(model.state_dict())
 
     optim = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=0)
 
-    # TODO: reload values
-
+    start_epoch = 0
+    fast = True
     state_buffer = []
     move_buffer = []
     reward_buffer = []
-    for epoch in range(EPOCHS):
+
+    #  reload values
+    checkpoint = torch.load(os.path.join(output, "checkpoint.pt"))
+    start_epoch = checkpoint["epoch"] + 1
+    state_buffer = checkpoint["state_buffer"]
+    move_buffer = checkpoint["move_buffer"]
+    reward_buffer = checkpoint["reward_buffer"]
+    model.load_state_dict(checkpoint["model_state_dict"])
+    best.load_state_dict(checkpoint["best_state_dict"])
+    optim.load_state_dict(checkpoint["optim_state_dict"])
+    # fast = checkpoint["fast"]  # TODO
+
+    for epoch in range(start_epoch, EPOCHS):
+        print("Epoch #{}".format(epoch))
         epoch_start = time.time()
         # TODO: select whether to do fast or proper rollouts
-        model.eval()  # TODO: also no_grad
-        state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
-        print("Epoch #{} playouts took {} seconds.".format(epoch, time.time() - epoch_start))
+        # if fast:
+        #     state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+        # else:
+        #     best.eval()  # TODO: also no_grad
+        #     best_heuristic = ModelHeuristic(best, device)  # TODO: this else block is incomplete
+        # print("Epoch #{} playouts took {} seconds.".format(epoch, time.time() - epoch_start))
 
-        t = time.time()
-        for (s, m, r) in zip(state, move, reward):
-            for i in range(len(s)):
-                state_buffer.append(s[i])
-                move_buffer.append(m[i] if m[i] is not None else -1)
-                reward_buffer.append(r)
+        # t = time.time()
+        # for (s, m, r) in zip(state, move, reward):
+        #     for i in range(len(s)):
+        #         state_buffer.append(s[i])
+        #         move_buffer.append(m[i] if m[i] is not None else -1)
+        #         reward_buffer.append(r)
 
         # TODO: cut buffer to desired length
 
@@ -469,18 +481,27 @@ def selfplay():
         print("Reward Acc:  {}".format(correct_r / n))
         print("Epoch #{} training took {} seconds.".format(epoch, time.time() - epoch_start))
 
+
+        # TODO: periodically check which model is better
+        if fast:
+            model.eval()  # TODO: also no_grad
+            model_heuristic = ModelHeuristic(model, device)
+            state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+            import code; code.interact(local=dict(globals(), **locals()))
+        else:
+            asdnaskdsajkd
+
+
+        # Save metadata
         torch.save({"epoch": epoch,
                     "state_buffer": state_buffer,
                     "move_buffer": move_buffer,
                     "reward_buffer": reward_buffer,
                     "model_state_dict": model.state_dict(),
                     "best_state_dict": best.state_dict(),
-                    'optim_state_dict': optim.state_dict(),
+                    "optim_state_dict": optim.state_dict(),
+                    "fast": fast,
                     }, os.path.join(output, "checkpoint.pt"))
-
-        # TODO: periodically check which model is better
-
-        # Save metadata
 
 
 def main():
