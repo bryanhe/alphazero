@@ -12,6 +12,9 @@ multiprocessing = multiprocessing.get_context("spawn")
 
 # TODO: need to terminate game if tie
 
+def init_state(m=6, n=7):
+    return np.zeros((3, m, n), np.bool)
+
 def print_board(state):
     _, m, n = state.shape
     print(" " + (4 * n - 1) * "-" + " ")
@@ -30,9 +33,6 @@ def print_board(state):
         print(" ")
         print(" " + (4 * n - 1) * "-" + " ")
     print(" " + "".join(["{:^4d}".format(i) for i in range(n)]) + " ", flush=True)
-
-def init_state(m=6, n=7):
-    return np.zeros((3, m, n), np.bool)
 
 @numba.jit(cache=True, nopython=True)
 def score(state):
@@ -98,6 +98,7 @@ def hash_state(state):
 def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
+# TODO: try to process root in blocks (and allow multidim root)
 def run(i, root, heuristic, batch=True, rollouts=400, alpha=5.0, tau=1.0, verbose=True):
     np.random.seed(i)
     _, m, n = root.shape
@@ -142,7 +143,7 @@ def run(i, root, heuristic, batch=True, rollouts=400, alpha=5.0, tau=1.0, verbos
             V[h] = V_buffer[i, 0]
         else:
             p, v = heuristic(np.expand_dims(state, 0))
-            P[h] = p[0, :]  # TODO: ???
+            P[h] = p[0, :]
             V[h] = v[0, 0]
 
         moves[h] = legal_moves(state)
@@ -208,23 +209,19 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
 
     print("Setting up memory:", time.time() - t); t = time.time()
     gpu = 0.
-    # with multiprocessing.Pool(processes=multiprocessing.cpu_count(), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
+    # TODO: only need to run init if batch
     with multiprocessing.Pool(processes=len(root), initializer=init, initargs=(barrier, state_buffer, P_buffer, V_buffer, root)) as pool:
         print("Setting up pool:", time.time() - t); t = time.time()
-        # TODO: just return from this
         ans = pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
-        for i in range(rollouts):
-            barrier.wait()
-            t = time.time()
-            P[:], V[:] = heuristic(state)
-            gpu += time.time() - t
-            barrier.wait()
-        print("gpu:", gpu); t = time.time()
+        if batch:
+            for i in range(rollouts):
+                barrier.wait()
+                t = time.time()
+                P[:], V[:] = heuristic(state)
+                gpu += time.time() - t
+                barrier.wait()
+            print("gpu:", gpu); t = time.time()
         ans = ans.get()
-        # ans = []
-        # for x in [(i, r, heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)]:
-        #     ans.append(run(*x))
-        # return ans
     print("sync", time.time() - t); t = time.time()
     print("TOTAL", time.time() -  start)
     print("AVE", (time.time() -  start) / len(root))
@@ -356,7 +353,7 @@ def play(p1, p2, n=1):
             break
         move = player[p](state)  # TODO: only query moves that arent done
         moves.append(move)
-        assert(all(l == [] or m in l for (m, l) in zip(move, legal)))
+        assert(all(d or m in l for (m, l, d) in zip(move, legal, done)))
         state = [next_state(s, m) if not d else s for (s, m, d) in zip(state, move, done)]
         p = 1 - p
     # if p1 == human or p2 == human:
@@ -385,25 +382,19 @@ def main():
     # play(human, random)
     # play(lambda state: mcts(state, heuristic), human)
     # play(lambda state: mcts(state, heuristic), lambda state: mcts(state, heuristic), 2)
+
     # TODO: eval and nograd
-
-    # states, moves, p = play(random, random)
-    # asd
-
     device = "cuda"
     model = Dual(5)
     model.to(device)
     model.eval()
-    # # play(lambda state: mcts(state, heuristic), human)
-    # import cProfile
-    # # cProfile.run("states, moves, p = play(lambda state: mcts(state, heuristic), lambda state:mcts(state, lambda state: (np.ones(7), 0)))")
-    # cProfile.run("states, moves, p = play(lambda state: mcts(state, lambda state: (np.ones(7), 0)), lambda state:mcts(state, lambda state: (np.ones(7), 0)))")
-    # asd
     model.share_memory()
     model_heuristic = ModelHeuristic(model, device)
 
     for i in range(1000):
-        states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, basic_heuristic), 128)
+        states, moves, p = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+        states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic), 128)
+        states, moves, p = play(lambda state: mcts(state, basic_heuristic), lambda state: mcts(state, model_heuristic), 128)
         states, moves, p = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, model_heuristic), 128)
         print("Reward: ", p, flush=True)
 
