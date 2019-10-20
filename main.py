@@ -33,6 +33,26 @@ def print_board(state):
         print(" " + (4 * n - 1) * "-" + " ")
     print(" " + "".join(["{:^4d}".format(i) for i in range(n)]) + " ", flush=True)
 
+def board2str(state):
+    _, m, n = state.shape
+    ans = ""
+    ans += (" " + (4 * n - 1) * "-" + " \n")
+    for i in range(m):
+        ans += "|"
+        for j in range(n):
+            ans += " "
+            assert(not (state[0, i, j] and state[1, i, j]))
+            if state[0, i, j]:
+                ans += "X"
+            elif state[1, i, j]:
+                ans += "O"
+            else:
+                ans += " "
+            ans += " |"
+        ans += " \n " + (4 * n - 1) * "-" + " \n"
+    ans += " " + "".join(["{:^4d}".format(i) for i in range(n)]) + " \n"
+    return ans
+
 @numba.jit(cache=True, nopython=True)
 def score(state):
     # import code; code.interact(local=locals())
@@ -98,7 +118,7 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 # TODO: try to process root in blocks (and allow multidim root)
-def run(i, root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
+def run(i, root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
     np.random.seed(i)
     _, m, n = root.shape
     done = set()  # Do not need to have a different copy per game
@@ -167,20 +187,21 @@ def run(i, root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbo
             Q_unnormalized[h][move] += v
             N[h][move] += 1
     p = N[hash_state(root)] ** (1 / tau)
+    # print(N[hash_state(root)])
     p /= p.sum()
     return np.random.choice(7, p=p)
 
-def init(barrier_, state_buffer_, P_buffer_, V_buffer_, root):
+def init(barrier_, state_buffer_, P_buffer_, V_buffer_, batch, root_shape):
     global barrier
     barrier = barrier_
     global state_buffer
-    state_buffer = np.frombuffer(state_buffer_, dtype=np.bool).reshape(len(root), *root[0].shape)
+    state_buffer = np.frombuffer(state_buffer_, dtype=np.bool).reshape(batch, *root_shape)
     global P_buffer
-    P_buffer = np.frombuffer(P_buffer_, dtype=np.float).reshape(len(root), 7)
+    P_buffer = np.frombuffer(P_buffer_, dtype=np.float).reshape(batch, 7)
     global V_buffer
-    V_buffer = np.frombuffer(V_buffer_, dtype=np.float).reshape(len(root), 1)
+    V_buffer = np.frombuffer(V_buffer_, dtype=np.float).reshape(batch, 1)
 
-def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose=True):
+def mcts(root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
     start = time.time()
     t = time.time()
     root = root.copy()
@@ -199,22 +220,22 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
     #     run(i)
 
     # TODO: set option to run sequentially (for debugging, and is faster when only a small number of roots)
-    if run.batch is None or run.batch < len(root):  # TODO: buffers probably have problems if not exact same size
+    if run.batch is None or run.batch != len(root):  # TODO: buffers probably have problems if not exact same size
         run.batch = len(root)
         if run.pool is not None:
-            pass  # TODO: free old pool
+            run.pool.close()
         # TODO: only need to run init if batch
         run.state_buffer = multiprocessing.RawArray("b", sum(r.size for r in root))
         run.P_buffer = multiprocessing.RawArray("d", 7 * len(root))
         run.V_buffer = multiprocessing.RawArray("d", 1 * len(root))
         run.barrier = multiprocessing.Barrier(len(root) + 1)
-        run.pool = multiprocessing.Pool(processes=len(root), initializer=init, initargs=(run.barrier, run.state_buffer, run.P_buffer, run.V_buffer, root))  # TODO: is root really needed
+        run.pool = multiprocessing.Pool(processes=len(root), initializer=init, initargs=(run.barrier, run.state_buffer, run.P_buffer, run.V_buffer, run.batch, root[0].shape))  # TODO: is root really needed
 
         print("Setting up pool:", time.time() - t); t = time.time()
 
-    state = np.frombuffer(run.state_buffer, dtype=np.bool).reshape(len(root), *root[0].shape)
-    P = np.frombuffer(run.P_buffer, dtype=np.float).reshape(len(root), 7)
-    V = np.frombuffer(run.V_buffer, dtype=np.float).reshape(len(root), 1)
+    state = np.frombuffer(run.state_buffer, dtype=np.bool).reshape(run.batch, *root[0].shape)
+    P = np.frombuffer(run.P_buffer, dtype=np.float).reshape(run.batch, 7)
+    V = np.frombuffer(run.V_buffer, dtype=np.float).reshape(run.batch, 1)
 
     gpu = 0.
     ans = run.pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
@@ -225,9 +246,10 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=5.0, tau=1.0, verbose
             P[:], V[:] = heuristic(state)
             gpu += time.time() - t
             run.barrier.wait()
-        print("gpu:", gpu); t = time.time()
+        t = time.time()
     ans = ans.get()
     print("sync", time.time() - t); t = time.time()
+    print("gpu:", gpu); 
     print("TOTAL", time.time() -  start)
     print("AVE", (time.time() -  start) / len(root))
     return ans
@@ -328,7 +350,7 @@ class Dual(torch.nn.Module):
         return p, v
 
 def human(state):
-    print_board(state)
+    print(board2str(state), flush=True)
 
     moves = set(legal_moves(state))
     # print(legal_moves)
@@ -355,10 +377,12 @@ def play(p1, p2, n=1):
             if not done[i]:
                 states[i].append(state[i])
         sc = [score(i) for i in state]
+        print(sc)
         legal = [legal_moves(i) for i in state]
         done = [s != 0 or l.shape[0] == 0 for (s, l) in zip(sc, legal)]
         if all(done):
             break
+        print("done", sum(done))
         move = player[p]([s for (s, d) in zip(state, done) if not d])
 
         index = 0
@@ -379,7 +403,7 @@ def play(p1, p2, n=1):
     if p1 == human or p2 == human:
     # if True:
         for ns in state:
-            print_board(s)
+            print(board2str(ns), flush=True)
     return states, moves, sc
 
 def basic_heuristic(state):
@@ -411,7 +435,7 @@ def selfplay():
     best = Dual(5)
     best.load_state_dict(model.state_dict())
 
-    optim = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=0)
+    optim = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9, weight_decay=0)
 
     start_epoch = 0
     fast = True
@@ -433,23 +457,24 @@ def selfplay():
     for epoch in range(start_epoch, EPOCHS):
         print("Epoch #{}".format(epoch))
         epoch_start = time.time()
-        # TODO: select whether to do fast or proper rollouts
-        # if fast:
-        #     state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
-        # else:
-        #     best.eval()  # TODO: also no_grad
-        #     best_heuristic = ModelHeuristic(best, device)  # TODO: this else block is incomplete
-        # print("Epoch #{} playouts took {} seconds.".format(epoch, time.time() - epoch_start))
 
-        # t = time.time()
-        # for (s, m, r) in zip(state, move, reward):
-        #     for i in range(len(s)):
-        #         state_buffer.append(s[i])
-        #         move_buffer.append(m[i] if m[i] is not None else -1)
-        #         reward_buffer.append(r)
+        if fast:
+            state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+        else:
+            best.eval()  # TODO: also no_grad
+            best_heuristic = ModelHeuristic(best, device)  # TODO: this else block is incomplete
+        print("Epoch #{} playouts took {} seconds.".format(epoch, time.time() - epoch_start))
+
+        t = time.time()
+        for (s, m, r) in zip(state, move, reward):
+            for i in range(len(s)):
+                state_buffer.append(s[i])
+                move_buffer.append(m[i] if m[i] is not None else -1)
+                reward_buffer.append(r)
 
         # TODO: cut buffer to desired length
 
+        t = time.time()
         total_pl = 0.
         total_rl = 0.
         correct_p = 0
@@ -479,15 +504,17 @@ def selfplay():
         print("Policy Acc:  {}".format(correct_p / n))
         print("Reward Loss: {}".format(total_rl / n))
         print("Reward Acc:  {}".format(correct_r / n))
-        print("Epoch #{} training took {} seconds.".format(epoch, time.time() - epoch_start))
+        print("Epoch #{} training took {} seconds.".format(epoch, time.time() - t))
 
 
         # TODO: periodically check which model is better
         if fast:
             model.eval()  # TODO: also no_grad
             model_heuristic = ModelHeuristic(model, device)
-            state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+            state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), 12)
             import code; code.interact(local=dict(globals(), **locals()))
+            print(reward.sum())
+            state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 128)
         else:
             asdnaskdsajkd
 
