@@ -444,91 +444,119 @@ def selfplay():
     reward_buffer = []
 
     #  reload values
-    checkpoint = torch.load(os.path.join(output, "checkpoint.pt"))
-    start_epoch = checkpoint["epoch"] + 1
-    state_buffer = checkpoint["state_buffer"]
-    move_buffer = checkpoint["move_buffer"]
-    reward_buffer = checkpoint["reward_buffer"]
-    model.load_state_dict(checkpoint["model_state_dict"])
-    best.load_state_dict(checkpoint["best_state_dict"])
-    optim.load_state_dict(checkpoint["optim_state_dict"])
-    # fast = checkpoint["fast"]  # TODO
+    try:
+        checkpoint = torch.load(os.path.join(output, "checkpoint.pt"))
+        start_epoch = checkpoint["epoch"] + 1
+        state_buffer = checkpoint["state_buffer"]
+        move_buffer = checkpoint["move_buffer"]
+        reward_buffer = checkpoint["reward_buffer"]
+        model.load_state_dict(checkpoint["model_state_dict"])
+        best.load_state_dict(checkpoint["best_state_dict"])
+        optim.load_state_dict(checkpoint["optim_state_dict"])
+        fast = checkpoint["fast"]
+    except FileNotFoundError:
+        pass
 
-    for epoch in range(start_epoch, EPOCHS):
-        print("Epoch #{}".format(epoch))
-        epoch_start = time.time()
+    with open(os.path.join(output, "log.txt"), "a") as f:
+        for epoch in range(start_epoch, EPOCHS):
+            print("Epoch #{}".format(epoch))
+            epoch_start = time.time()
 
-        if fast:
-            state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
-        else:
-            best.eval()  # TODO: also no_grad
-            best_heuristic = ModelHeuristic(best, device)  # TODO: this else block is incomplete
-        print("Epoch #{} playouts took {} seconds.".format(epoch, time.time() - epoch_start))
+            if fast:
+                state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+            else:
+                best.eval()  # TODO: also no_grad
+                best_heuristic = ModelHeuristic(best, device)  # TODO: this else block is incomplete
+            for (s, m, r) in zip(state, move, reward):
+                for i in range(len(s)):
+                    state_buffer.append(s[i])
+                    move_buffer.append(m[i] if m[i] is not None else -1)
+                    reward_buffer.append(r)
+            print("Epoch #{} playouts took {} seconds.".format(epoch, time.time() - epoch_start))
+            f.write("Epoch #{} playouts took {} seconds.\n".format(epoch, time.time() - epoch_start))
+            f.flush()
 
-        t = time.time()
-        for (s, m, r) in zip(state, move, reward):
-            for i in range(len(s)):
-                state_buffer.append(s[i])
-                move_buffer.append(m[i] if m[i] is not None else -1)
-                reward_buffer.append(r)
+            # TODO: cut buffer to desired length
 
-        # TODO: cut buffer to desired length
-
-        t = time.time()
-        total_pl = 0.
-        total_rl = 0.
-        correct_p = 0
-        correct_r = 0
-        n = 0
-        model.train()
-        dataset = torch.utils.data.TensorDataset(torch.as_tensor(state_buffer, dtype=torch.float), torch.as_tensor(move_buffer), torch.as_tensor(reward_buffer))
-        loader = torch.utils.data.DataLoader(dataset, num_workers=8, batch_size=256, shuffle=True, drop_last=True)
-        for (s, m, r) in loader:
-            s = s.to(device)
-            m = m.to(device)
-            r = r.to(device)
-            p, v = model(s)
-            policy_loss = torch.nn.functional.cross_entropy(p, m, ignore_index=-1)
-            reward_loss = torch.nn.functional.mse_loss(v.view(-1), r.float())
-            loss = reward_loss + policy_loss
-            total_pl += policy_loss.item() * s.shape[0]
-            total_rl += reward_loss.item() * s.shape[0]
-            correct_r += (v.round().long().view(-1) == r).sum().item()
-            correct_p += (torch.argmax(p, dim=1) == m).sum().item()  # TODO: need to fix denominator for this -- not all states have a move
-            n += s.shape[0]
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-        
-        print("Policy Loss: {}".format(total_pl / n))
-        print("Policy Acc:  {}".format(correct_p / n))
-        print("Reward Loss: {}".format(total_rl / n))
-        print("Reward Acc:  {}".format(correct_r / n))
-        print("Epoch #{} training took {} seconds.".format(epoch, time.time() - t))
-
-
-        # TODO: periodically check which model is better
-        if fast:
-            model.eval()  # TODO: also no_grad
-            model_heuristic = ModelHeuristic(model, device)
-            state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), 12)
-            import code; code.interact(local=dict(globals(), **locals()))
-            print(reward.sum())
-            state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 128)
-        else:
-            asdnaskdsajkd
+            t = time.time()
+            total_pl = 0.
+            total_rl = 0.
+            correct_p = 0
+            correct_r = 0
+            n = 0
+            model.train()
+            dataset = torch.utils.data.TensorDataset(torch.as_tensor(state_buffer, dtype=torch.float), torch.as_tensor(move_buffer), torch.as_tensor(reward_buffer))
+            loader = torch.utils.data.DataLoader(dataset, num_workers=8, batch_size=256, shuffle=True, drop_last=True)
+            for (s, m, r) in loader:
+                s = s.to(device)
+                m = m.to(device)
+                r = r.to(device)
+                p, v = model(s)
+                policy_loss = torch.nn.functional.cross_entropy(p, m, ignore_index=-1)
+                reward_loss = torch.nn.functional.mse_loss(v.view(-1), r.float())
+                loss = reward_loss + policy_loss
+                total_pl += policy_loss.item() * s.shape[0]
+                total_rl += reward_loss.item() * s.shape[0]
+                correct_r += (v.round().long().view(-1) == r).sum().item()
+                correct_p += (torch.argmax(p, dim=1) == m).sum().item()  # TODO: need to fix denominator for this -- not all states have a move
+                n += s.shape[0]
+                optim.zero_grad()
+                loss.backward()
+                optim.step()
+            
+            print("Policy Loss: {}".format(total_pl / n))
+            print("Policy Acc:  {}".format(correct_p / n))
+            print("Reward Loss: {}".format(total_rl / n))
+            print("Reward Acc:  {}".format(correct_r / n))
+            print("Epoch #{} training took {} seconds.".format(epoch, time.time() - t))
+            f.write("Policy Loss: {}\n".format(total_pl / n))
+            f.write("Policy Acc:  {}\n".format(correct_p / n))
+            f.write("Reward Loss: {}\n".format(total_rl / n))
+            f.write("Reward Acc:  {}\n".format(correct_r / n))
+            f.write("Epoch #{} training took {} seconds.\n".format(epoch, time.time() - t))
+            f.flush()
 
 
-        # Save metadata
-        torch.save({"epoch": epoch,
-                    "state_buffer": state_buffer,
-                    "move_buffer": move_buffer,
-                    "reward_buffer": reward_buffer,
-                    "model_state_dict": model.state_dict(),
-                    "best_state_dict": best.state_dict(),
-                    "optim_state_dict": optim.state_dict(),
-                    "fast": fast,
-                    }, os.path.join(output, "checkpoint.pt"))
+            # TODO: periodically check which model is better
+            if epoch % 10 == 0: # TODO and epoch != 0
+                if fast:
+                    model.eval()  # TODO: also no_grad
+                    model_heuristic = ModelHeuristic(model, device)
+
+                    t = time.time()
+                    state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+                    torch.save({"state": state,
+                                "move": move,
+                                "reward": reward,
+                                }, os.path.join(output, "tournament_{}_first.pt".format(epoch)))
+                    print("Epoch #{} playing first evaluation took {} seconds: {} win, {} draw, {} loss".format(epoch, time.time() - t, (np.array(reward) == 1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == -1).sum()))
+                    f.write("Epoch #{} playing first evaluation took {} seconds: {} win, {} draw, {} loss\n".format(epoch, time.time() - t, (np.array(reward) == 1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == -1).sum()))
+                    f.flush()
+                    # [print(board2str(s), torch.softmax(p, 0).detach().cpu().numpy(), v.item()) for (s, p, v) in zip(state[0], *model(torch.Tensor(state[0]).cuda()))]
+                    t = time.time()
+                    state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), 128)
+
+                    torch.save({"state": state,
+                                "move": move,
+                                "reward": reward,
+                                }, os.path.join(output, "tournament_{}_second.pt".format(epoch)))
+                    print("Epoch #{} playing second evaluation took {} seconds: {} win, {} draw, {} loss".format(epoch, time.time() - t, (np.array(reward) == -1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == 1).sum()))
+                    f.write("Epoch #{} playing second evaluation took {} seconds: {} win, {} draw, {} loss\n".format(epoch, time.time() - t, (np.array(reward) == -1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == 1).sum()))
+                    f.flush()
+                else:
+                    asdnaskdsajkd
+
+            # Save metadata
+            torch.save({"epoch": epoch,
+                        "state_buffer": state_buffer,
+                        "move_buffer": move_buffer,
+                        "reward_buffer": reward_buffer,
+                        "model_state_dict": model.state_dict(),
+                        "best_state_dict": best.state_dict(),
+                        "optim_state_dict": optim.state_dict(),
+                        "fast": fast,
+                        }, os.path.join(output, "checkpoint_{}.pt".format(epoch)))
+            # TODO: symlink checkpoint_{}.pt to checkpoint.pt
 
 
 def main():
