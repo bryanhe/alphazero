@@ -119,7 +119,7 @@ def random(state):
 
 # TODO: try to process root in blocks (and allow multidim root)
 def run(i, root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
-    np.random.seed(i)
+    np.random.seed(i)  # TODO: check if seed causes selfplay to generate redundant games every iteration
     _, m, n = root.shape
     done = set()  # Do not need to have a different copy per game
     moves = {}
@@ -228,7 +228,7 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose
         run.state_buffer = multiprocessing.RawArray("b", sum(r.size for r in root))
         run.P_buffer = multiprocessing.RawArray("d", 7 * len(root))
         run.V_buffer = multiprocessing.RawArray("d", 1 * len(root))
-        run.barrier = multiprocessing.Barrier(len(root) + 1)
+        run.barrier = multiprocessing.Barrier(len(root) + 1)  # TODO: could make a list of barriers for all numbers
         run.pool = multiprocessing.Pool(processes=len(root), initializer=init, initargs=(run.barrier, run.state_buffer, run.P_buffer, run.V_buffer, run.batch, root[0].shape))  # TODO: is root really needed
 
         print("Setting up pool:", time.time() - t); t = time.time()
@@ -529,8 +529,8 @@ def selfplay():
                                 "move": move,
                                 "reward": reward,
                                 }, os.path.join(output, "tournament_{}_first.pt".format(epoch)))
-                    print("Epoch #{} playing first evaluation took {} seconds: {} win, {} draw, {} loss".format(epoch, time.time() - t, (np.array(reward) == 1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == -1).sum()))
-                    f.write("Epoch #{} playing first evaluation took {} seconds: {} win, {} draw, {} loss\n".format(epoch, time.time() - t, (np.array(reward) == 1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == -1).sum()))
+                    print("Epoch #{} playing first evaluation took {} seconds: {} win, {} draw, {} loss".format(epoch, time.time() - t, (np.array(reward) == -1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == 1).sum()))
+                    f.write("Epoch #{} playing first evaluation took {} seconds: {} win, {} draw, {} loss\n".format(epoch, time.time() - t, (np.array(reward) == -1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == 1).sum()))
                     f.flush()
                     # [print(board2str(s), torch.softmax(p, 0).detach().cpu().numpy(), v.item()) for (s, p, v) in zip(state[0], *model(torch.Tensor(state[0]).cuda()))]
                     t = time.time()
@@ -540,8 +540,8 @@ def selfplay():
                                 "move": move,
                                 "reward": reward,
                                 }, os.path.join(output, "tournament_{}_second.pt".format(epoch)))
-                    print("Epoch #{} playing second evaluation took {} seconds: {} win, {} draw, {} loss".format(epoch, time.time() - t, (np.array(reward) == -1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == 1).sum()))
-                    f.write("Epoch #{} playing second evaluation took {} seconds: {} win, {} draw, {} loss\n".format(epoch, time.time() - t, (np.array(reward) == -1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == 1).sum()))
+                    print("Epoch #{} playing second evaluation took {} seconds: {} win, {} draw, {} loss".format(epoch, time.time() - t, (np.array(reward) == 1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == -1).sum()))
+                    f.write("Epoch #{} playing second evaluation took {} seconds: {} win, {} draw, {} loss\n".format(epoch, time.time() - t, (np.array(reward) == 1).sum(), (np.array(reward) == 0).sum(), (np.array(reward) == -1).sum()))
                     f.flush()
                 else:
                     asdnaskdsajkd
