@@ -119,7 +119,8 @@ def random(state):
 
 # TODO: try to process root in blocks (and allow multidim root)
 def run(i, root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
-    np.random.seed(i)  # TODO: check if seed causes selfplay to generate redundant games every iteration
+    np.random.seed()  # Need to re-seed RNG or all processes will play out same game
+
     _, m, n = root.shape
     done = set()  # Do not need to have a different copy per game
     moves = {}
