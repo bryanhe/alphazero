@@ -424,7 +424,7 @@ class ModelHeuristic(object):
         return P.detach().cpu().numpy(), V.detach().cpu().numpy()
 
 def selfplay():
-    EPOCHS = 1000
+    EPOCHS = 1
     BUFFER_SIZE = 1000
     device = ("cuda" if torch.cuda.is_available() else "cpu")
     output = "output"
@@ -465,7 +465,7 @@ def selfplay():
             epoch_start = time.time()
 
             if fast:
-                state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+                state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 2)
             else:
                 best.eval()  # TODO: also no_grad
                 best_heuristic = ModelHeuristic(best, device)  # TODO: this else block is incomplete
@@ -526,7 +526,7 @@ def selfplay():
                     model_heuristic = ModelHeuristic(model, device)
 
                     t = time.time()
-                    state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 128)
+                    state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 2)
                     torch.save({"state": state,
                                 "move": move,
                                 "reward": reward,
@@ -536,7 +536,7 @@ def selfplay():
                     f.flush()
                     # [print(board2str(s), torch.softmax(p, 0).detach().cpu().numpy(), v.item()) for (s, p, v) in zip(state[0], *model(torch.Tensor(state[0]).cuda()))]
                     t = time.time()
-                    state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), 128)
+                    state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), 2)
 
                     torch.save({"state": state,
                                 "move": move,
