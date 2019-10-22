@@ -118,7 +118,7 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 # TODO: try to process root in blocks (and allow multidim root)
-def run(i, root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
+def run(i, batchsize, root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
     np.random.seed()  # Need to re-seed RNG or all processes will play out same game
 
     _, m, n = root.shape
@@ -158,8 +158,8 @@ def run(i, root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbo
         # Expand
         if batch:
             state_buffer[i, ...] = state
-            barrier.wait()
-            barrier.wait()
+            barrier[batchsize].wait()
+            barrier[batchsize].wait()
             P[h] = P_buffer[i, :]
             V[h] = V_buffer[i, 0]
         else:
@@ -221,7 +221,7 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose
     #     run(i)
 
     # TODO: set option to run sequentially (for debugging, and is faster when only a small number of roots)
-    if run.batch is None or run.batch != len(root):  # TODO: buffers probably have problems if not exact same size
+    if run.batch is None or run.batch < len(root):
         run.batch = len(root)
         if run.pool is not None:
             run.pool.close()
@@ -229,7 +229,7 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose
         run.state_buffer = multiprocessing.RawArray("b", sum(r.size for r in root))
         run.P_buffer = multiprocessing.RawArray("d", 7 * len(root))
         run.V_buffer = multiprocessing.RawArray("d", 1 * len(root))
-        run.barrier = multiprocessing.Barrier(len(root) + 1)  # TODO: could make a list of barriers for all numbers
+        run.barrier = [multiprocessing.Barrier(i + 1) for i in range(len(root) + 1)]  # TODO: do all barriers need to be created at the start, or can they be set to None until needed?
         run.pool = multiprocessing.Pool(processes=len(root), initializer=init, initargs=(run.barrier, run.state_buffer, run.P_buffer, run.V_buffer, run.batch, root[0].shape))  # TODO: is root really needed
 
         print("Setting up pool:", time.time() - t); t = time.time()
@@ -239,14 +239,15 @@ def mcts(root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose
     V = np.frombuffer(run.V_buffer, dtype=np.float).reshape(run.batch, 1)
 
     gpu = 0.
-    ans = run.pool.starmap_async(run, [(i, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
+    batchsize = len(root)
+    ans = run.pool.starmap_async(run, [(i, batchsize, r, None if batch else heuristic, batch, rollouts, alpha, tau, verbose) for (i, r) in enumerate(root)])
     if batch:
         for i in range(rollouts):
-            run.barrier.wait()
+            run.barrier[batchsize].wait()
             t = time.time()
-            P[:], V[:] = heuristic(state)
+            P[:], V[:] = heuristic(state)  # TODO: don't eval for all states (some may be garbage at the end)
             gpu += time.time() - t
-            run.barrier.wait()
+            run.barrier[batchsize].wait()
         t = time.time()
     ans = ans.get()
     print("sync", time.time() - t); t = time.time()
