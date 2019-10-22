@@ -13,8 +13,10 @@ import torch.utils.data
 multiprocessing = multiprocessing.get_context("spawn")
 
 EPOCHS = 1
-BLOCKS = 5
+BLOCKS = 1
 SIMULATIONS = 32
+TOURNAMENT = 1
+ROLLOUTS = 200
 
 def init_state(m=6, n=7):
     return np.zeros((3, m, n), np.bool)
@@ -123,7 +125,7 @@ def random(state):
     return [np.random.choice(legal_moves(s)) for s in state]
 
 # TODO: try to process root in blocks (and allow multidim root)
-def run(i, batchsize, root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
+def run(i, batchsize, root, heuristic, batch=True, rollouts=ROLLOUTS, alpha=1.0, tau=1.0, verbose=True):
     np.random.seed()  # Need to re-seed RNG or all processes will play out same game
 
     _, m, n = root.shape
@@ -207,7 +209,7 @@ def init(barrier_, state_buffer_, P_buffer_, V_buffer_, batch, root_shape):
     global V_buffer
     V_buffer = np.frombuffer(V_buffer_, dtype=np.float).reshape(batch, 1)
 
-def mcts(root, heuristic, batch=True, rollouts=1600, alpha=1.0, tau=1.0, verbose=True):
+def mcts(root, heuristic, batch=True, rollouts=ROLLOUTS, alpha=1.0, tau=1.0, verbose=True):
     start = time.time()
     t = time.time()
     root = root.copy()
@@ -530,7 +532,7 @@ def selfplay():
                     model_heuristic = ModelHeuristic(model, device)
 
                     t = time.time()
-                    state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), SIMULATIONS)
+                    state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), TOURNAMENT)
                     torch.save({"state": state,
                                 "move": move,
                                 "reward": reward,
@@ -540,7 +542,7 @@ def selfplay():
                     f.flush()
                     # [print(board2str(s), torch.softmax(p, 0).detach().cpu().numpy(), v.item()) for (s, p, v) in zip(state[0], *model(torch.Tensor(state[0]).cuda()))]
                     t = time.time()
-                    state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), SIMULATIONS)
+                    state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), TOURNAMENT)
 
                     torch.save({"state": state,
                                 "move": move,
