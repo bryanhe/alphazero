@@ -426,7 +426,7 @@ class ModelHeuristic(object):
 def selfplay():
     EPOCHS = 1000
     BUFFER_SIZE = 1000
-    device = "cuda"
+    device = ("cuda" if torch.cuda.is_available() else "cpu")
     output = "output"
     os.makedirs(output, exist_ok=True)
 
