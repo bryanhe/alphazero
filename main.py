@@ -12,6 +12,10 @@ import torch.multiprocessing as multiprocessing
 import torch.utils.data
 multiprocessing = multiprocessing.get_context("spawn")
 
+EPOCHS = 1
+BLOCKS = 5
+SIMULATIONS = 32
+
 def init_state(m=6, n=7):
     return np.zeros((3, m, n), np.bool)
 
@@ -425,17 +429,16 @@ class ModelHeuristic(object):
         return P.detach().cpu().numpy(), V.detach().cpu().numpy()
 
 def selfplay():
-    EPOCHS = 1
     BUFFER_SIZE = 1000
     device = ("cuda" if torch.cuda.is_available() else "cpu")
     output = "output"
     os.makedirs(output, exist_ok=True)
 
-    model = Dual(5)
+    model = Dual(BLOCKS)
     model.to(device)
     model.share_memory()  # TODO: is this needed?
 
-    best = Dual(5)
+    best = Dual(BLOCKS)
     best.load_state_dict(model.state_dict())
 
     optim = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9, weight_decay=0)
@@ -466,7 +469,7 @@ def selfplay():
             epoch_start = time.time()
 
             if fast:
-                state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), 2)
+                state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, basic_heuristic, batch=False), SIMULATIONS)
             else:
                 best.eval()  # TODO: also no_grad
                 best_heuristic = ModelHeuristic(best, device)  # TODO: this else block is incomplete
@@ -527,7 +530,7 @@ def selfplay():
                     model_heuristic = ModelHeuristic(model, device)
 
                     t = time.time()
-                    state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), 2)
+                    state, move, reward = play(lambda state: mcts(state, model_heuristic), lambda state: mcts(state, basic_heuristic, batch=False), SIMULATIONS)
                     torch.save({"state": state,
                                 "move": move,
                                 "reward": reward,
@@ -537,7 +540,7 @@ def selfplay():
                     f.flush()
                     # [print(board2str(s), torch.softmax(p, 0).detach().cpu().numpy(), v.item()) for (s, p, v) in zip(state[0], *model(torch.Tensor(state[0]).cuda()))]
                     t = time.time()
-                    state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), 2)
+                    state, move, reward = play(lambda state: mcts(state, basic_heuristic, batch=False), lambda state: mcts(state, model_heuristic), SIMULATIONS)
 
                     torch.save({"state": state,
                                 "move": move,
