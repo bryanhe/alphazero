@@ -424,7 +424,7 @@ class ModelHeuristic(object):
     def __call__(self, state):
         # print(state)
         # P, V = self.model(torch.Tensor(state).to(self.device))
-        P, V = self.model(torch.Tensor(state).to(self.device))
+        P, V = self.model(torch.as_tensor(state, dtype=torch.float).to(self.device))
         P = torch.softmax(P, 1)
         return P.detach().cpu().numpy(), V.detach().cpu().numpy()
 
