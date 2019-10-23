@@ -5,8 +5,11 @@ os:
   - osx
 
 env:
+  - PYTHON_VERSION=3.5 PYTORCH_VERSION=1.1
   - PYTHON_VERSION=3.5 PYTORCH_VERSION=1.2
+  - PYTHON_VERSION=3.6 PYTORCH_VERSION=1.1
   - PYTHON_VERSION=3.6 PYTORCH_VERSION=1.2
+  - PYTHON_VERSION=3.7 PYTORCH_VERSION=1.1
   - PYTHON_VERSION=3.7 PYTORCH_VERSION=1.2
 
 install:
@@ -26,6 +29,7 @@ install:
   - conda update -q conda
   # Useful for debugging any issues with conda
   - conda info -a
+  - conda search pytorch
 
   - conda create -q -n test-environment python=${PYTHON_VERSION} pytorch=${PYTORCH_VERSION}
   - conda activate test-environment
