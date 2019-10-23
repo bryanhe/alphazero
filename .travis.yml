@@ -10,8 +10,14 @@ env:
   - PYTHON_VERSION=3.7 PYTORCH_VERSION=1.2
 
 install:
-  - sudo apt-get update
-  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then MINICONDA_OS=Linux; else MINICONDA_OS=MacOSX; fi
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]];
+    then
+        MINICONDA_OS=Linux;
+        sudo apt-get update
+    else
+        MINICONDA_OS=MacOSX;
+        brew update
+    fi
   - wget https://repo.anaconda.com/miniconda/Miniconda3-latest-${MINICONDA_OS}-x86_64.sh -O miniconda.sh
   - bash miniconda.sh -b -p $HOME/miniconda
   - source "$HOME/miniconda/etc/profile.d/conda.sh"
